@@ -17,6 +17,10 @@ var (
 	funcGetDesktopWindow, _     = syscall.GetProcAddress(syscall.Handle(libUser32), "GetDesktopWindow")
 	funcGetWindowTextW, _       = syscall.GetProcAddress(syscall.Handle(libUser32), "GetWindowTextW")
 	funcGetWindowTextLengthW, _ = syscall.GetProcAddress(syscall.Handle(libUser32), "GetWindowTextLengthW")
+	user32                      = syscall.NewLazyDLL("user32.dll")
+	getWindowTextW              = user32.NewProc("GetWindowTextW")
+
+	enumWindows = user32.NewProc("EnumWindows")
 )
 
 func main() {
@@ -36,7 +40,68 @@ func main() {
 	// https://github.com/lxn/win/issues/19
 	spew.Dump(hwnd)
 
-	win.EnumChildWindows(hwnd, syscall.NewCallback(printme), 0)
+	//win.EnumChildWindows(hwnd, syscall.NewCallback(printme), 0)
+	fmt.Println("--------------")
+	dump()
+}
+
+func dump() {
+	l := listWindows(win.HWND(0))
+	for _, win := range l {
+		if !win.caption || !win.visible || win.name == "" {
+			continue
+		}
+		fmt.Printf("%d:%s ", win.pid, win.process)
+		fmt.Printf("[%X]", win.hwnd)
+		fmt.Printf(" '%s' (%s) %d,%d %dx%d: style '%d'\n",
+			win.name, win.class,
+			win.r.Left, win.r.Top,
+			win.r.Right-win.r.Left, win.r.Bottom-win.r.Top, win.style)
+	}
+}
+
+type window struct {
+	hwnd        win.HWND
+	pid         uint32
+	name, class string
+	process     string
+	r           win.RECT
+	visible     bool
+	hasChild    bool
+	style       int32
+	caption     bool
+}
+type cbData struct {
+	list []window
+	pid  map[uint32]string
+}
+
+func listWindows(hwnd win.HWND) []window {
+	var d cbData
+	d.list = make([]window, 0)
+	d.pid = make(map[uint32]string)
+	//win.EnumChildWindows(hwnd, syscall.NewCallback(perWindow), uintptr(unsafe.Pointer(&d)))
+	// https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-enumwindows
+	syscall.Syscall(enumWindows.Addr(), 2,
+		//uintptr(hwnd),
+		syscall.NewCallback(perWindow),
+		uintptr(unsafe.Pointer(&d)), 0)
+	return d.list
+}
+
+func perWindow(hwnd win.HWND, param uintptr) uintptr {
+	// https://go101.org/article/unsafe.html
+	d := (*cbData)(unsafe.Pointer(param))
+	w := window{hwnd: hwnd}
+	w.visible = win.IsWindowVisible(hwnd)
+	win.GetWindowRect(hwnd, &w.r)
+	w.name = getName(hwnd, getWindowTextW)
+	w.hasChild = win.GetWindow(hwnd, win.GW_CHILD) != 0
+	w.style = win.GetWindowLong(hwnd, win.GWL_STYLE)
+	// https://stackoverflow.com/questions/21503109/how-to-use-enumwindows-to-get-only-actual-application-windows
+	w.caption = ((w.style & 0x10C00000) == 0x10C00000)
+	d.list = append(d.list, w)
+	return 1
 }
 
 func getDesktopWindow() win.HWND {
@@ -44,6 +109,19 @@ func getDesktopWindow() win.HWND {
 	return win.HWND(ret)
 }
 
+const bufSiz = 128 // Max length I want to see
+func getName(hwnd win.HWND, get *syscall.LazyProc) string {
+	var buf [bufSiz]uint16
+	siz, _, _ := get.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	if siz == 0 {
+		return ""
+	}
+	name := syscall.UTF16ToString(buf[:siz])
+	if siz == bufSiz-1 {
+		name = name + "\u22EF"
+	}
+	return name
+}
 func printme(hwnd uintptr, lParam uintptr) uintptr {
 	spew.Dump(hwnd)
 	fmt.Printf("getWindowText: '%s'\n", getWindowText(hwnd))
