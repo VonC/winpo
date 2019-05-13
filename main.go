@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
+	"io"
 	"log"
+	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -43,42 +48,54 @@ func main() {
 	//win.EnumChildWindows(hwnd, syscall.NewCallback(printme), 0)
 	fmt.Println("--------------")
 	dump()
+
 }
 
 func dump() {
 	l := listWindows(win.HWND(0))
 	for _, win := range l {
-		if !win.caption || !win.visible || win.name == "" {
+		if !win.Caption || !win.Visible || win.Name == "" {
 			continue
 		}
 		fmt.Printf("%d:%s ", win.pid, win.process)
-		fmt.Printf("[%X]", win.hwnd)
+		fmt.Printf("[%X]", win.Hwnd)
 		fmt.Printf(" '%s' (%s) %d,%d %dx%d: style '%d'\n",
-			win.name, win.class,
-			win.r.Left, win.r.Top,
-			win.r.Right-win.r.Left, win.r.Bottom-win.r.Top, win.style)
+			win.Name, win.Class,
+			win.R.Left, win.R.Top,
+			win.R.Right-win.R.Left, win.R.Bottom-win.R.Top, win.Style)
 	}
+
+	if err := Save("./file.tmp", &l); err != nil {
+		log.Fatalln(err)
+	}
+	// load it back
+	var ll []*window
+	if err := Load("./file.tmp", &ll); err != nil {
+		log.Fatalln(err)
+	}
+
 }
 
 type window struct {
-	hwnd        win.HWND
+	Hwnd        win.HWND
 	pid         uint32
-	name, class string
+	Name, Class string
 	process     string
-	r           win.RECT
-	visible     bool
+	R           win.RECT
+	Visible     bool
+	Maximize    bool
 	hasChild    bool
-	style       int32
-	caption     bool
+	Style       int32
+	Caption     bool
 }
 type cbData struct {
-	list []window
+	list []*window
 	pid  map[uint32]string
 }
 
-func listWindows(hwnd win.HWND) []window {
+func listWindows(hwnd win.HWND) []*window {
 	var d cbData
-	d.list = make([]window, 0)
+	d.list = make([]*window, 0)
 	d.pid = make(map[uint32]string)
 	//win.EnumChildWindows(hwnd, syscall.NewCallback(perWindow), uintptr(unsafe.Pointer(&d)))
 	// https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-enumwindows
@@ -92,15 +109,18 @@ func listWindows(hwnd win.HWND) []window {
 func perWindow(hwnd win.HWND, param uintptr) uintptr {
 	// https://go101.org/article/unsafe.html
 	d := (*cbData)(unsafe.Pointer(param))
-	w := window{hwnd: hwnd}
-	w.visible = win.IsWindowVisible(hwnd)
-	win.GetWindowRect(hwnd, &w.r)
-	w.name = getName(hwnd, getWindowTextW)
+	w := window{Hwnd: hwnd}
+	w.Visible = win.IsWindowVisible(hwnd)
+	win.GetWindowRect(hwnd, &w.R)
+	w.Name = getName(hwnd, getWindowTextW)
 	w.hasChild = win.GetWindow(hwnd, win.GW_CHILD) != 0
-	w.style = win.GetWindowLong(hwnd, win.GWL_STYLE)
+	w.Style = win.GetWindowLong(hwnd, win.GWL_STYLE)
 	// https://stackoverflow.com/questions/21503109/how-to-use-enumwindows-to-get-only-actual-application-windows
-	w.caption = ((w.style & 0x10C00000) == 0x10C00000)
-	d.list = append(d.list, w)
+	w.Maximize = ((w.Style & 0x01000000) == 0x01000000)
+	w.Caption = ((w.Style & 0x10C00000) == 0x10C00000)
+	if w.Caption && w.Visible && w.Name != "" {
+		d.list = append(d.list, &w)
+	}
 	return 1
 }
 
@@ -121,32 +141,6 @@ func getName(hwnd win.HWND, get *syscall.LazyProc) string {
 		name = name + "\u22EF"
 	}
 	return name
-}
-func printme(hwnd uintptr, lParam uintptr) uintptr {
-	spew.Dump(hwnd)
-	fmt.Printf("getWindowText: '%s'\n", getWindowText(hwnd))
-	return 1 // true to continue
-}
-
-func getWindowText(hwnd uintptr) string {
-	iLen := getWindowTextLength(hwnd) + 1
-	buf := make([]uint16, iLen)
-
-	if _, _, err := syscall.Syscall(uintptr(funcGetWindowTextW), 3, uintptr(hwnd), uintptr(unsafe.Pointer(&buf[0])), uintptr(iLen)); err != 0 {
-		log.Fatalf("Call GetWindowText failed:" + syscall.Errno(err).Error())
-	}
-	return syscall.UTF16ToString(buf)
-}
-
-func getWindowTextLength(hwnd uintptr) int {
-
-	var ret uintptr
-	var err syscall.Errno
-	if ret, _, err = syscall.Syscall(uintptr(funcGetWindowTextLengthW), 1, uintptr(hwnd), 0, 0); err != 0 {
-		log.Fatalf("Call GetWindowTextLengthW failed:" + syscall.Errno(err).Error())
-	}
-
-	return int(ret)
 }
 
 // https://github.com/kbinani/screenshot/blob/9ef8b9209e372fbb0c126cc2648e33bece0c9660/screenshot_windows.go
@@ -200,4 +194,57 @@ func getMonitorBoundsCallback(hMonitor win.HMONITOR, hdcMonitor win.HDC, lprcMon
 	ctx.Count = ctx.Count + 1
 	return uintptr(1)
 
+}
+
+// https://medium.com/@matryer/golang-advent-calendar-day-eleven-persisting-go-objects-to-disk-7caf1ee3d11d
+
+// Marshal is a function that marshals the object into an
+// io.Reader.
+// By default, it uses the JSON marshaller.
+var Marshal = func(v interface{}) (io.Reader, error) {
+	b, err := json.MarshalIndent(v, "", "\t")
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(b), nil
+}
+
+var lock sync.Mutex
+
+// Save saves a representation of v to the file at path.
+func Save(path string, v interface{}) error {
+	lock.Lock()
+	defer lock.Unlock()
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	r, err := Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, r)
+	return err
+}
+
+// Unmarshal is a function that unmarshals the data from the
+// reader into the specified value.
+// By default, it uses the JSON unmarshaller.
+var Unmarshal = func(r io.Reader, v interface{}) error {
+	return json.NewDecoder(r).Decode(v)
+}
+
+// Load loads the file at path into v.
+// Use os.IsNotExist() to see if the returned error is due
+// to the file being missing.
+func Load(path string, v interface{}) error {
+	lock.Lock()
+	defer lock.Unlock()
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return Unmarshal(f, v)
 }
