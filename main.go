@@ -24,6 +24,7 @@ var (
 	funcGetWindowTextLengthW, _ = syscall.GetProcAddress(syscall.Handle(libUser32), "GetWindowTextLengthW")
 	user32                      = syscall.NewLazyDLL("user32.dll")
 	getWindowTextW              = user32.NewProc("GetWindowTextW")
+	getWindow                   = user32.NewProc("GetWindow")
 
 	enumWindows = user32.NewProc("EnumWindows")
 )
@@ -47,14 +48,16 @@ func main() {
 
 	//win.EnumChildWindows(hwnd, syscall.NewCallback(printme), 0)
 	fmt.Println("--------------")
-	dump()
+	l := dump()
 
+	hwnd = getDesktopWindow()
+	zorder(hwnd, l)
 }
 
-func dump() {
+func dump() []*window {
 	l := listWindows(win.HWND(0))
 	for _, win := range l {
-		if !win.Caption || !win.Visible || win.Name == "" {
+		if !win.Caption || !win.visible || win.Name == "" {
 			continue
 		}
 		fmt.Printf("%d:%s ", win.pid, win.process)
@@ -73,7 +76,7 @@ func dump() {
 	if err := Load("./file.tmp", &ll); err != nil {
 		log.Fatalln(err)
 	}
-
+	return l
 }
 
 type window struct {
@@ -82,7 +85,7 @@ type window struct {
 	Name, Class string
 	process     string
 	R           win.RECT
-	Visible     bool
+	visible     bool
 	Maximize    bool
 	hasChild    bool
 	Style       int32
@@ -91,6 +94,43 @@ type window struct {
 type cbData struct {
 	list []*window
 	pid  map[uint32]string
+}
+
+const (
+	gwHWNDFIRST = 0
+	gwHWNDLAST  = 1
+	gwHWNDNEXT  = 2
+	gwHWNDPREV  = 3
+	gwOWNER     = 4
+	gwCHILD     = 5
+)
+
+// https://stackoverflow.com/questions/825595/how-to-get-the-z-order-in-windows
+// https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-getwindow
+func zorder(hwnd win.HWND, l []*window) {
+	// See also https://github.com/GompaMindPeople/CNN/blob/9c8425cf314a4adf1c010b2a9c6068a7c2634610/src/utils/windowsProTest.go
+	lowestHwndp, _, _ := getWindow.Call(uintptr(hwnd), uintptr(gwCHILD))
+	z := 0
+	lowestHwnd := win.HWND(lowestHwndp)
+	fmt.Printf("lowestHwnd='%+v' from hwnd='%+v'\n", lowestHwnd, hwnd)
+	hwndTmp := lowestHwnd
+	for hwndTmp != 0 {
+		elligible := false
+		for _, win := range l {
+			//fmt.Printf("[%X] vs. <%X>\n", hwndTmp, win.Hwnd)
+			if win.Hwnd == hwndTmp {
+				elligible = true
+				break
+			}
+		}
+		name := getName(hwndTmp, getWindowTextW)
+		if elligible {
+			fmt.Printf("hwndTmp='%+v' for zorder: '%d' (name '%s')\n", hwndTmp, z, name)
+		}
+		hwndTmpp, _, _ := getWindow.Call(uintptr(hwndTmp), uintptr(gwHWNDNEXT))
+		hwndTmp = win.HWND(hwndTmpp)
+		z = z + 1
+	}
 }
 
 func listWindows(hwnd win.HWND) []*window {
@@ -110,7 +150,7 @@ func perWindow(hwnd win.HWND, param uintptr) uintptr {
 	// https://go101.org/article/unsafe.html
 	d := (*cbData)(unsafe.Pointer(param))
 	w := window{Hwnd: hwnd}
-	w.Visible = win.IsWindowVisible(hwnd)
+	w.visible = win.IsWindowVisible(hwnd)
 	win.GetWindowRect(hwnd, &w.R)
 	w.Name = getName(hwnd, getWindowTextW)
 	w.hasChild = win.GetWindow(hwnd, win.GW_CHILD) != 0
@@ -118,7 +158,7 @@ func perWindow(hwnd win.HWND, param uintptr) uintptr {
 	// https://stackoverflow.com/questions/21503109/how-to-use-enumwindows-to-get-only-actual-application-windows
 	w.Maximize = ((w.Style & 0x01000000) == 0x01000000)
 	w.Caption = ((w.Style & 0x10C00000) == 0x10C00000)
-	if w.Caption && w.Visible && w.Name != "" {
+	if w.Caption && w.visible && w.Name != "" {
 		d.list = append(d.list, &w)
 	}
 	return 1
