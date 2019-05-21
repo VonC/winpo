@@ -12,19 +12,21 @@ import (
 	"syscall"
 	"unsafe"
 
+	"strings"
+
 	"github.com/davecgh/go-spew/spew"
 	"github.com/lxn/win"
 )
 
 var (
-	libUser32, _                = syscall.LoadLibrary("user32.dll")
-	funcEnumDisplayMonitors, _  = syscall.GetProcAddress(syscall.Handle(libUser32), "EnumDisplayMonitors")
-	funcGetDesktopWindow, _     = syscall.GetProcAddress(syscall.Handle(libUser32), "GetDesktopWindow")
-	funcGetWindowTextW, _       = syscall.GetProcAddress(syscall.Handle(libUser32), "GetWindowTextW")
-	funcGetWindowTextLengthW, _ = syscall.GetProcAddress(syscall.Handle(libUser32), "GetWindowTextLengthW")
-	user32                      = syscall.NewLazyDLL("user32.dll")
-	getWindowTextW              = user32.NewProc("GetWindowTextW")
-	getWindow                   = user32.NewProc("GetWindow")
+	libUser32, _               = syscall.LoadLibrary("user32.dll")
+	funcEnumDisplayMonitors, _ = syscall.GetProcAddress(syscall.Handle(libUser32), "EnumDisplayMonitors")
+	funcGetDesktopWindow, _    = syscall.GetProcAddress(syscall.Handle(libUser32), "GetDesktopWindow")
+	// funcGetWindowTextW, _       = syscall.GetProcAddress(syscall.Handle(libUser32), "GetWindowTextW")
+	// funcGetWindowTextLengthW, _ = syscall.GetProcAddress(syscall.Handle(libUser32), "GetWindowTextLengthW")
+	user32         = syscall.NewLazyDLL("user32.dll")
+	getWindowTextW = user32.NewProc("GetWindowTextW")
+	getWindow      = user32.NewProc("GetWindow")
 
 	enumWindows = user32.NewProc("EnumWindows")
 )
@@ -52,6 +54,14 @@ func main() {
 
 	hwnd = getDesktopWindow()
 	zorder(hwnd, l)
+	for _, w := range l {
+		if strings.Contains(w.Name, "senv2") {
+			win.MoveWindow(w.Hwnd, 10, 20, 450, 300, true)
+			win.SetForegroundWindow(w.Hwnd)
+			win.BringWindowToTop(w.Hwnd)
+			win.ShowWindow(w.Hwnd, win.SW_MAXIMIZE)
+		}
+	}
 }
 
 func dump() []*window {
@@ -97,12 +107,12 @@ type cbData struct {
 }
 
 const (
-	gwHWNDFIRST = 0
-	gwHWNDLAST  = 1
-	gwHWNDNEXT  = 2
-	gwHWNDPREV  = 3
-	gwOWNER     = 4
-	gwCHILD     = 5
+	// gwHWNDFIRST = 0
+	// gwHWNDLAST  = 1
+	gwHWNDNEXT = 2
+	// gwHWNDPREV  = 3
+	// gwOWNER     = 4
+	gwCHILD = 5
 )
 
 // https://stackoverflow.com/questions/825595/how-to-get-the-z-order-in-windows
@@ -139,7 +149,7 @@ func listWindows(hwnd win.HWND) []*window {
 	d.pid = make(map[uint32]string)
 	//win.EnumChildWindows(hwnd, syscall.NewCallback(perWindow), uintptr(unsafe.Pointer(&d)))
 	// https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-enumwindows
-	syscall.Syscall(enumWindows.Addr(), 2,
+	_, _, _ = syscall.Syscall(enumWindows.Addr(), 2,
 		//uintptr(hwnd),
 		syscall.NewCallback(perWindow),
 		uintptr(unsafe.Pointer(&d)), 0)
@@ -185,6 +195,11 @@ func getName(hwnd win.HWND, get *syscall.LazyProc) string {
 
 // https://github.com/kbinani/screenshot/blob/9ef8b9209e372fbb0c126cc2648e33bece0c9660/screenshot_windows.go
 func numActiveDisplays() int {
+	// see also
+	// https://github.com/search?q=EnumDisplayMonitors+extension%3Ago&type=Code
+	// https://github.com/austinhyde/wallpaper-go/blob/60745ad3fd10b18d832cdb6685b3cc2ed4d7eee4/winutils/winutils.go#L36-L57
+	// https://github.com/kbinani/screenshot/blob/9ef8b9209e372fbb0c126cc2648e33bece0c9660/screenshot_windows.go#L95-L109
+	// https://github.com/redgoat650/window-scale/blob/5974d75f1f529a0b630adbeb49603781275391bf/windowScale.go
 	var count int
 	enumDisplayMonitors(win.HDC(0), nil, syscall.NewCallback(countupMonitorCallback), uintptr(unsafe.Pointer(&count)))
 	return count
@@ -212,8 +227,7 @@ func enumDisplayMonitors(hdc win.HDC, lprcClip *win.RECT, lpfnEnum uintptr, dwDa
 }
 
 func countupMonitorCallback(hMonitor win.HMONITOR, hdcMonitor win.HDC, lprcMonitor *win.RECT, dwData uintptr) uintptr {
-	var count *int
-	count = (*int)(unsafe.Pointer(dwData))
+	count := (*int)(unsafe.Pointer(dwData))
 	*count = *count + 1
 	return uintptr(1)
 }
@@ -225,8 +239,7 @@ type getMonitorBoundsContext struct {
 }
 
 func getMonitorBoundsCallback(hMonitor win.HMONITOR, hdcMonitor win.HDC, lprcMonitor *win.RECT, dwData uintptr) uintptr {
-	var ctx *getMonitorBoundsContext
-	ctx = (*getMonitorBoundsContext)(unsafe.Pointer(dwData))
+	ctx := (*getMonitorBoundsContext)(unsafe.Pointer(dwData))
 	if ctx.Count == ctx.Index {
 		ctx.Rect = *lprcMonitor
 		return uintptr(0)
